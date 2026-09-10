@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"go-antifraud/internal/cache"
-	"go-antifraud/internal/database"
-	logger "go-antifraud/internal/logging"
-	"go-antifraud/internal/platform/config"
+	"vigilantgo/internal/cache"
+	"vigilantgo/internal/database"
+	logger "vigilantgo/internal/logging"
+	"vigilantgo/internal/platform/config"
 
 	"github.com/go-chi/chi"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,13 +26,16 @@ import (
 
 func main() {
 	_ = godotenv.Load()
+	cfg := config.Load()
 
 	env := os.Getenv("APP_ENV")
 
 	logger := logger.New(env)
 	slog.SetDefault(logger)
 
-	cfg := config.Load()
+	if migrateCLI() {
+		return
+	}
 
 	if err := runServer(cfg); err != nil {
 		slog.Error("Application terminated with error", "error", err)
@@ -43,7 +47,7 @@ func runServer(cfg *config.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db, err := database.NewPool(ctx, os.Getenv("DB_URL"))
+	db, err := database.NewPool(ctx, os.Getenv("APP_DB_URL"))
 	if err != nil {
 		return fmt.Errorf("init db: %w", err)
 	}
@@ -82,6 +86,26 @@ func newRouter(db *pgxpool.Pool, rdb *redis.Client) *chi.Mux {
 	r.Get("/health/ready", readinessHandler(db, rdb))
 
 	return r
+}
+
+func migrateCLI() bool {
+	var cmd string
+	var version int
+
+	flag.StringVar(&cmd, "cmd", "", "migration command: up, down, force, version")
+	flag.IntVar(&version, "version", version, "version for force or migrate command")
+	flag.Parse()
+
+	if cmd == "" {
+		return false
+	}
+
+	if err := database.RunMigrations(cmd, version); err != nil {
+		slog.Error("Failed to migrate", "error", err)
+	}
+	slog.Info("Migration completed")
+
+	return true
 }
 
 func livenessHandler() http.HandlerFunc {

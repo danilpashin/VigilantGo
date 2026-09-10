@@ -71,3 +71,52 @@ jobs:
 
       - name: Build Docker images
         run: docker compose build
+  
+  migrate:
+    name: Migrations Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres-test:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install golang-migrate CLI
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install \
+            -tags postgres \
+            github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Run migrations on test DB
+        env:
+          DATABASE_URL: postgres://test_user:test_password@localhost:5432/test_db?sslmode=disable
+        run: |
+          migrate -path "$GITHUB_WORKSPACE/migrations" \
+            -database "$DATABASE_URL" up
+
+          migrate -path "$GITHUB_WORKSPACE/migrations" \
+            -database "$DATABASE_URL" version

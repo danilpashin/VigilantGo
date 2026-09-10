@@ -16,5 +16,3 @@ USER appuser
 WORKDIR /app
 
 COPY --from=builder /app/vigilant-go ./vigilant-go
-
-CMD ["./vigilant-go"]
