@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	logger "go-antifraud/internal/logging"
-	"go-antifraud/internal/platform/config"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,8 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"go-antifraud/internal/cache"
+	"go-antifraud/internal/database"
+	logger "go-antifraud/internal/logging"
+	"go-antifraud/internal/platform/config"
+
 	"github.com/go-chi/chi"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
@@ -37,18 +40,21 @@ func main() {
 }
 
 func runServer(cfg *config.Config) error {
-	db, err := initDB()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := database.NewPool(ctx, os.Getenv("DB_URL"))
 	if err != nil {
 		return fmt.Errorf("init db: %w", err)
 	}
 
-	cache, err := initCache()
+	rdb, err := cache.NewClient(ctx, os.Getenv("REDIS_URL"))
 	if err != nil {
-		_ = db.Close(context.Background())
+		db.Close()
 		return fmt.Errorf("init cache: %w", err)
 	}
 
-	r := newRouter(db, cache)
+	r := newRouter(db, rdb)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%s", cfg.HTTPPort),
@@ -67,50 +73,15 @@ func runServer(cfg *config.Config) error {
 		}
 	}()
 
-	return gracefulShutdown(srv, db, cache, serverErr)
+	return gracefulShutdown(srv, db, rdb, serverErr)
 }
 
-func newRouter(db *pgx.Conn, cache *redis.Client) *chi.Mux {
+func newRouter(db *pgxpool.Pool, rdb *redis.Client) *chi.Mux {
 	r := chi.NewRouter()
 	r.Get("/health/live", livenessHandler())
-	r.Get("/health/ready", readinessHandler(db, cache))
+	r.Get("/health/ready", readinessHandler(db, rdb))
 
 	return r
-}
-
-func initDB() (*pgx.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, err := pgx.Connect(ctx, os.Getenv("DB_URL"))
-	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
-	}
-
-	if err = conn.Ping(ctx); err != nil {
-		_ = conn.Close(context.Background())
-		return nil, fmt.Errorf("ping: %w", err)
-	}
-
-	return conn, nil
-}
-
-func initCache() (*redis.Client, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     os.Getenv("REDIS_URL"),
-		Password: "",
-		DB:       0,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		_ = rdb.Close()
-		return nil, fmt.Errorf("ping: %w", err)
-	}
-
-	return rdb, nil
 }
 
 func livenessHandler() http.HandlerFunc {
@@ -124,7 +95,7 @@ type HealthResponse struct {
 	Checks map[string]string `json:"checks"`
 }
 
-func readinessHandler(db *pgx.Conn, cache *redis.Client) http.HandlerFunc {
+func readinessHandler(db *pgxpool.Pool, cache *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -136,13 +107,13 @@ func readinessHandler(db *pgx.Conn, cache *redis.Client) http.HandlerFunc {
 		isReady := true
 
 		if err := db.Ping(ctx); err != nil {
-			slog.ErrorContext(ctx, "Readiness check: DB ping failed", "error", err)
+			slog.ErrorContext(ctx, "Readiness check: DB ping failed", slog.Any("error", err))
 			checks["db"] = "DOWN"
 			isReady = false
 		}
 
 		if err := cache.Ping(ctx).Err(); err != nil {
-			slog.ErrorContext(ctx, "Readiness check: Cache ping failed", "error", err)
+			slog.ErrorContext(ctx, "Readiness check: Cache ping failed", slog.Any("error", err))
 			checks["cache"] = "DOWN"
 			isReady = false
 		}
@@ -167,7 +138,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-func gracefulShutdown(srv *http.Server, db *pgx.Conn, cache *redis.Client, serverErr <-chan error) error {
+func gracefulShutdown(srv *http.Server, db *pgxpool.Pool, cache *redis.Client, serverErr <-chan error) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -184,19 +155,16 @@ func gracefulShutdown(srv *http.Server, db *pgx.Conn, cache *redis.Client, serve
 	var shutdownErr error
 
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("HTTP shutdown error", "error", err)
+		slog.Error("HTTP shutdown error", slog.Any("error", err))
 		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("srv shutdown: %w", err))
 	}
 
 	if err := cache.Close(); err != nil {
-		slog.Error("Redis close error", "error", err)
+		slog.Error("Redis close error", slog.Any("error", err))
 		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("redis close: %w", err))
 	}
 
-	if err := db.Close(ctx); err != nil {
-		slog.Error("DB close error", "error", err)
-		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("db close: %w", err))
-	}
+	db.Close()
 
 	if shutdownErr == nil {
 		slog.Info("Server stopped cleanly")
