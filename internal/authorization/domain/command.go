@@ -1,6 +1,9 @@
-package authorization
+package domain
 
-import "time"
+import (
+	"time"
+	"uuid"
+)
 
 type Transaction struct {
 	AmountMinor     uint64
@@ -31,4 +34,16 @@ type Decision struct {
 	RulesetVersion string
 	Degraded       bool
 	CreatedAt      time.Time
+}
+
+type OutcomeStatus string
+
+type AuthorizationOutcome struct {
+	AuthorizationID       uuid.UUID
+	Status                OutcomeStatus
+	ProcessorResponseCode *string
+	Source                string
+	SourceEventID         string
+	IdempotencyKey        string
+	OccurredAt            time.Time
 }

@@ -12,6 +12,7 @@ import (
 	"vigilantgo/internal/adapters/inbound/http/middleware"
 	"vigilantgo/internal/authorization/application"
 
+	"github.com/go-chi/chi"
 	"github.com/go-playground/validator/v10"
 )
 
@@ -129,6 +130,88 @@ func (h *Handler) Evaluate(w http.ResponseWriter, r *http.Request) {
 		Replayed:        result.Replayed,
 		ProcessingTime:  result.ProcessingTime.Milliseconds(),
 	})
+}
+
+func (h *Handler) SaveOutcome(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	if !isJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, ErrorResponse{
+			Code:    "UNSUPPORTED_CONTENT_TYPE",
+			Message: "Content-Type must be application/json",
+		})
+		return
+	}
+
+	var req AuthorizationOutcomeRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrorResponse{
+			Code:    "MALFORMED_JSON",
+			Message: "request contains invalid JSON",
+		})
+		return
+	}
+
+	if err := h.validate.Struct(req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrorResponse{
+			Code:    "VALIDATION_FAILED",
+			Message: "request contains invalid fields",
+			Details: validationDetails(err),
+		})
+		return
+	}
+
+	if h.authorize == nil {
+		writeError(w, http.StatusNotImplemented, ErrorResponse{
+			Code:    "USE_CASE_NOT_CONFIGURED",
+			Message: "authorization use case is not configured",
+		})
+		return
+	}
+
+	sourceSystem := chi.URLParam(r, "sourceSystem")
+	authorizationID := chi.URLParam(r, "authorizationID")
+
+	if sourceSystem == "" || authorizationID == "" {
+		writeError(w, http.StatusBadRequest, ErrorResponse{
+			Code:    "MISSING_VALUES",
+			Message: "request must contain source system and authorization id",
+		})
+		return
+	}
+
+	cmd := application.OutcomeCommand{
+		AuthorizationID:        authorizationID,
+		SourceSystem:           sourceSystem,
+		Status:                 req.Status,
+		ProccessorResponseCode: req.ProcessorResponseCode,
+		OccurredAt:             req.OccurredAt,
+		IdempotencyKey:         middleware.IdempotencyKeyFromContext(r.Context()),
+		RequestID:              middleware.RequestIDFromContext(r.Context()),
+	}
+
+	err := h.authorize.SaveOutcome(r.Context(), cmd)
+	if err != nil {
+		if errors.Is(err, application.ErrInvalidCommand) {
+			writeError(w, http.StatusBadRequest, ErrorResponse{
+				Code:    "VALIDATION_FAILED",
+				Message: "request contains invalid fields",
+			})
+			return
+		}
+
+		slog.ErrorContext(r.Context(), "authorization outcome failed", slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, ErrorResponse{
+			Code:    "INTERNAL_ERROR",
+			Message: "authorization outcome could not be processed",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, nil)
 }
 
 type ErrorResponse struct {

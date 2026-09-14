@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"time"
+	domain "vigilantgo/internal/authorization/domain"
 )
 
 type AuthorizeCommand struct {
@@ -43,6 +44,19 @@ type AuthorizationResult struct {
 	ProcessingTime  time.Duration
 }
 
+type OutcomeCommand struct {
+	AuthorizationID        string
+	SourceSystem           string
+	Status                 string
+	ProccessorResponseCode string
+	OccurredAt             time.Time
+	IdempotencyKey         string
+	RequestID              string
+}
+
+type AuthorizationOutcome = domain.AuthorizationOutcome
+
 type AuthorizationUseCase interface {
 	Evaluate(ctx context.Context, cmd AuthorizeCommand) (AuthorizationResult, error)
+	SaveOutcome(ctx context.Context, cmd OutcomeCommand) error
 }

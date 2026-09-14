@@ -22,8 +22,9 @@ func NewRouter(authorizationHandler *inhttp.Handler, db *pgxpool.Pool, rdb *redi
 	r.Get("/health/ready", readinessHandler(db, rdb))
 
 	r.Route("/v1", func(r chi.Router) {
-		r.With(middleware.IdempotencyCheckMiddleware).
-			Post("/authorizations/evaluate", authorizationHandler.Evaluate)
+		r.Use(middleware.IdempotencyCheckMiddleware)
+		r.Post("/authorizations/evaluate", authorizationHandler.Evaluate)
+		r.Put("/authorizations/{sourceSystem}/{authorizationID}/outcome", authorizationHandler.SaveOutcome)
 	})
 
 	return r

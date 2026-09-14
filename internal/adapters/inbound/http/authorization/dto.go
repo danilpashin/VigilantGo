@@ -37,3 +37,9 @@ type Merchant struct {
 	City       string `json:"city" validate:"required"`
 	TerminalID string `json:"terminal_id" validate:"required"`
 }
+
+type AuthorizationOutcomeRequest struct {
+	Status                string    `json:"status" validate:"required,uppercase"`
+	ProcessorResponseCode string    `json:"processor_response_code" validate:"required,len=2"`
+	OccurredAt            time.Time `json:"occurred_at" validate:"required"`
+}

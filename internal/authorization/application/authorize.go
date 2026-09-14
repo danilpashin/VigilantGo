@@ -7,17 +7,22 @@ import (
 	"uuid"
 
 	domain "vigilantgo/internal/authorization/domain"
-	"vigilantgo/internal/profile/ports"
+	"vigilantgo/internal/authorization/ports"
 )
 
-var ErrInvalidCommand = errors.New("invalid authorization command")
+var (
+	ErrInvalidCommand       = errors.New("invalid authorization command")
+	ErrProfileReaderMissing = errors.New("authorization profile reader is not configured")
+	ErrOutcomeWriterMissing = errors.New("authorization outcome writer is not configured")
+)
 
 type Service struct {
 	profileReader ports.ProfileReader
+	outcomeWriter ports.OutcomeWriter
 }
 
-func NewService(profileReader ports.ProfileReader) *Service {
-	return &Service{profileReader: profileReader}
+func NewService(profileReader ports.ProfileReader, outcomeWriter ports.OutcomeWriter) *Service {
+	return &Service{profileReader: profileReader, outcomeWriter: outcomeWriter}
 }
 
 func (s *Service) Evaluate(ctx context.Context, cmd AuthorizeCommand) (AuthorizationResult, error) {
@@ -28,6 +33,9 @@ func (s *Service) Evaluate(ctx context.Context, cmd AuthorizeCommand) (Authoriza
 	}
 	if cmd.AuthorizationID == "" || cmd.SourceSystem == "" || cmd.AmountMinor == 0 {
 		return AuthorizationResult{}, ErrInvalidCommand
+	}
+	if s.profileReader == nil {
+		return AuthorizationResult{}, ErrProfileReaderMissing
 	}
 
 	transaction := domain.Transaction{
@@ -54,4 +62,42 @@ func (s *Service) Evaluate(ctx context.Context, cmd AuthorizeCommand) (Authoriza
 		Replayed:        false,
 		ProcessingTime:  time.Since(startedAt),
 	}, nil
+}
+
+func (s *Service) SaveOutcome(ctx context.Context, cmd OutcomeCommand) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if cmd.AuthorizationID == "" || cmd.SourceSystem == "" || cmd.Status == "" || cmd.RequestID == "" || cmd.IdempotencyKey == "" {
+		return ErrInvalidCommand
+	}
+
+	authorizationID, err := uuid.Parse(cmd.AuthorizationID)
+	if err != nil {
+		return ErrInvalidCommand
+	}
+	if s.outcomeWriter == nil {
+		return ErrOutcomeWriterMissing
+	}
+
+	var processorResponseCode *string
+	if cmd.ProccessorResponseCode != "" {
+		processorResponseCode = &cmd.ProccessorResponseCode
+	}
+
+	err = s.outcomeWriter.SaveOutcome(ctx, domain.AuthorizationOutcome{
+		AuthorizationID:       authorizationID,
+		Status:                domain.OutcomeStatus(cmd.Status),
+		ProcessorResponseCode: processorResponseCode,
+		Source:                cmd.SourceSystem,
+		SourceEventID:         cmd.RequestID,
+		IdempotencyKey:        cmd.IdempotencyKey,
+		OccurredAt:            cmd.OccurredAt,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

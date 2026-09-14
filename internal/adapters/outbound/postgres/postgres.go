@@ -3,7 +3,9 @@ package postgres
 import (
 	"context"
 
-	"vigilantgo/internal/profile/domain"
+	authorizationdomain "vigilantgo/internal/authorization/domain"
+	authorizationports "vigilantgo/internal/authorization/ports"
+	profiledomain "vigilantgo/internal/profile/domain"
 	profileports "vigilantgo/internal/profile/ports"
 
 	"github.com/jackc/pgx/v5"
@@ -20,7 +22,7 @@ func NewProfileRepository(pool *pgxpool.Pool) *ProfileRepository {
 
 var _ profileports.ProfileRepository = (*ProfileRepository)(nil)
 
-func (r *ProfileRepository) GetProfile(ctx context.Context, cardToken, currency string) (*domain.Profile, error) {
+func (r *ProfileRepository) GetProfile(ctx context.Context, cardToken, currency string) (*profiledomain.Profile, error) {
 	const query = `
 		SELECT
 			p.customer_id,
@@ -39,7 +41,7 @@ func (r *ProfileRepository) GetProfile(ctx context.Context, cardToken, currency 
 		  AND p.currency = $2
 	`
 
-	var profile domain.Profile
+	var profile profiledomain.Profile
 	err := r.pool.QueryRow(ctx, query, cardToken, currency).Scan(
 		&profile.CustomerID,
 		&profile.Currency,
@@ -59,7 +61,7 @@ func (r *ProfileRepository) GetProfile(ctx context.Context, cardToken, currency 
 	return &profile, nil
 }
 
-func (r *ProfileRepository) SetProfile(ctx context.Context, profile domain.Profile) (bool, error) {
+func (r *ProfileRepository) SetProfile(ctx context.Context, profile profiledomain.Profile) (bool, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, err
@@ -175,4 +177,52 @@ func (r *ProfileRepository) SetProfile(ctx context.Context, profile domain.Profi
 	}
 
 	return true, nil
+}
+
+type OutcomeRepository struct {
+	pool *pgxpool.Pool
+}
+
+func NewOutcomeRepository(pool *pgxpool.Pool) *OutcomeRepository {
+	return &OutcomeRepository{pool: pool}
+}
+
+var _ authorizationports.OutcomeRepository = (*OutcomeRepository)(nil)
+
+func (r *OutcomeRepository) SaveOutcome(ctx context.Context, outcome authorizationdomain.AuthorizationOutcome) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	const query = `
+		INSERT INTO authorization_outcomes (
+			authorization_id,
+			status,
+			processor_response_code,
+			source,
+			source_event_id,
+			idempotency_key,
+			occurred_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+
+	if _, err = tx.Exec(ctx, query,
+		outcome.AuthorizationID,
+		outcome.Status,
+		outcome.ProcessorResponseCode,
+		outcome.Source,
+		outcome.SourceEventID,
+		outcome.IdempotencyKey,
+		outcome.OccurredAt,
+	); err != nil {
+		return err
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
