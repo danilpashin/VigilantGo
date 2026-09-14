@@ -8,21 +8,68 @@ import (
 
 	domain "vigilantgo/internal/authorization/domain"
 	"vigilantgo/internal/authorization/ports"
+	"vigilantgo/internal/platform/database"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
-	ErrInvalidCommand       = errors.New("invalid authorization command")
-	ErrProfileReaderMissing = errors.New("authorization profile reader is not configured")
-	ErrOutcomeWriterMissing = errors.New("authorization outcome writer is not configured")
+	ErrInvalidCommand             = errors.New("invalid authorization command")
+	ErrProfileReaderMissing       = errors.New("authorization profile reader is not configured")
+	ErrOutcomeWriterMissing       = errors.New("authorization outcome writer is not configured")
+	ErrTransactionManagerMissing  = errors.New("authorization transaction manager is not configured")
+	ErrTransactionCallbackMissing = errors.New("authorization transaction callback is not configured")
 )
 
-type Service struct {
-	profileReader ports.ProfileReader
-	outcomeWriter ports.OutcomeWriter
+type TransactionManager struct {
+	pool *pgxpool.Pool
 }
 
-func NewService(profileReader ports.ProfileReader, outcomeWriter ports.OutcomeWriter) *Service {
-	return &Service{profileReader: profileReader, outcomeWriter: outcomeWriter}
+func NewTransactionManager(pool *pgxpool.Pool) *TransactionManager {
+	return &TransactionManager{pool: pool}
+}
+
+func (m *TransactionManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) (err error) {
+	if m == nil || m.pool == nil {
+		return ErrTransactionManagerMissing
+	}
+	if fn == nil {
+		return ErrTransactionCallbackMissing
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			err = errors.Join(err, rollbackErr)
+		}
+	}()
+
+	err = fn(database.WithTransaction(ctx, tx))
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+type Service struct {
+	profileReader      ports.ProfileReader
+	outcomeWriter      ports.OutcomeWriter
+	transactionManager *TransactionManager
+}
+
+func NewService(profileReader ports.ProfileReader, outcomeWriter ports.OutcomeWriter, transactionManager ...*TransactionManager) *Service {
+	service := &Service{profileReader: profileReader, outcomeWriter: outcomeWriter}
+	if len(transactionManager) > 0 {
+		service.transactionManager = transactionManager[0]
+	}
+	return service
 }
 
 func (s *Service) Evaluate(ctx context.Context, cmd AuthorizeCommand) (AuthorizationResult, error) {
@@ -86,7 +133,7 @@ func (s *Service) SaveOutcome(ctx context.Context, cmd OutcomeCommand) error {
 		processorResponseCode = &cmd.ProccessorResponseCode
 	}
 
-	err = s.outcomeWriter.SaveOutcome(ctx, domain.AuthorizationOutcome{
+	outcome := domain.AuthorizationOutcome{
 		AuthorizationID:       authorizationID,
 		Status:                domain.OutcomeStatus(cmd.Status),
 		ProcessorResponseCode: processorResponseCode,
@@ -94,10 +141,13 @@ func (s *Service) SaveOutcome(ctx context.Context, cmd OutcomeCommand) error {
 		SourceEventID:         cmd.RequestID,
 		IdempotencyKey:        cmd.IdempotencyKey,
 		OccurredAt:            cmd.OccurredAt,
-	})
-	if err != nil {
-		return err
 	}
 
-	return nil
+	save := func(saveCtx context.Context) error {
+		return s.outcomeWriter.SaveOutcome(saveCtx, outcome)
+	}
+	if s.transactionManager != nil {
+		return s.transactionManager.WithinTransaction(ctx, save)
+	}
+	return save(ctx)
 }

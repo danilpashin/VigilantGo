@@ -5,6 +5,7 @@ import (
 
 	authorizationdomain "vigilantgo/internal/authorization/domain"
 	authorizationports "vigilantgo/internal/authorization/ports"
+	"vigilantgo/internal/platform/database"
 	profiledomain "vigilantgo/internal/profile/domain"
 	profileports "vigilantgo/internal/profile/ports"
 
@@ -42,7 +43,7 @@ func (r *ProfileRepository) GetProfile(ctx context.Context, cardToken, currency 
 	`
 
 	var profile profiledomain.Profile
-	err := r.pool.QueryRow(ctx, query, cardToken, currency).Scan(
+	err := database.Executor(ctx, r.pool).QueryRow(ctx, query, cardToken, currency).Scan(
 		&profile.CustomerID,
 		&profile.Currency,
 		&profile.ProfileVersion,
@@ -62,11 +63,17 @@ func (r *ProfileRepository) GetProfile(ctx context.Context, cardToken, currency 
 }
 
 func (r *ProfileRepository) SetProfile(ctx context.Context, profile profiledomain.Profile) (bool, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return false, err
+	executor := database.Executor(ctx, r.pool)
+	var tx pgx.Tx
+	var err error
+	if executor == r.pool {
+		tx, err = r.pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return false, err
+		}
+		executor = tx
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	const profileQuery = `
 		INSERT INTO customer_profiles (
@@ -93,7 +100,7 @@ func (r *ProfileRepository) SetProfile(ctx context.Context, profile profiledomai
 			updated_at = EXCLUDED.updated_at
 	`
 
-	if _, err = tx.Exec(ctx, profileQuery,
+	if _, err = executor.Exec(ctx, profileQuery,
 		profile.CustomerID,
 		profile.Currency,
 		profile.ProfileVersion,
@@ -127,7 +134,7 @@ func (r *ProfileRepository) SetProfile(ctx context.Context, profile profiledomai
 	`
 
 	for _, stat := range profile.MCCStats {
-		if _, err = tx.Exec(ctx, mccQuery,
+		if _, err = executor.Exec(ctx, mccQuery,
 			profile.CustomerID,
 			profile.Currency,
 			stat.MCC,
@@ -159,7 +166,7 @@ func (r *ProfileRepository) SetProfile(ctx context.Context, profile profiledomai
 	`
 
 	for _, stat := range profile.CountryStats {
-		if _, err = tx.Exec(ctx, countryQuery,
+		if _, err = executor.Exec(ctx, countryQuery,
 			profile.CustomerID,
 			profile.Currency,
 			stat.Country,
@@ -172,8 +179,10 @@ func (r *ProfileRepository) SetProfile(ctx context.Context, profile profiledomai
 		}
 	}
 
-	if err = tx.Commit(ctx); err != nil {
-		return false, err
+	if tx != nil {
+		if err = tx.Commit(ctx); err != nil {
+			return false, err
+		}
 	}
 
 	return true, nil
@@ -190,11 +199,17 @@ func NewOutcomeRepository(pool *pgxpool.Pool) *OutcomeRepository {
 var _ authorizationports.OutcomeRepository = (*OutcomeRepository)(nil)
 
 func (r *OutcomeRepository) SaveOutcome(ctx context.Context, outcome authorizationdomain.AuthorizationOutcome) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
+	executor := database.Executor(ctx, r.pool)
+	var tx pgx.Tx
+	var err error
+	if executor == r.pool {
+		tx, err = r.pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return err
+		}
+		executor = tx
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	const query = `
 		INSERT INTO authorization_outcomes (
@@ -208,7 +223,7 @@ func (r *OutcomeRepository) SaveOutcome(ctx context.Context, outcome authorizati
 		) VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 
-	if _, err = tx.Exec(ctx, query,
+	if _, err = executor.Exec(ctx, query,
 		outcome.AuthorizationID,
 		outcome.Status,
 		outcome.ProcessorResponseCode,
@@ -220,8 +235,10 @@ func (r *OutcomeRepository) SaveOutcome(ctx context.Context, outcome authorizati
 		return err
 	}
 
-	if err = tx.Commit(ctx); err != nil {
-		return err
+	if tx != nil {
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
 	}
 
 	return nil

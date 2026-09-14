@@ -62,8 +62,9 @@ func runServer(cfg *config.Config) error {
 
 	profileRepository := postgres.NewProfileRepository(db)
 	outcomeRepository := postgres.NewOutcomeRepository(db)
+	transactionManager := authorizationapp.NewTransactionManager(db)
 
-	authorizationService := authorizationapp.NewService(profileRepository, outcomeRepository)
+	authorizationService := authorizationapp.NewService(profileRepository, outcomeRepository, transactionManager)
 	authorizationHandler := inhttp.NewHandler(authorizationService)
 
 	r := router.NewRouter(authorizationHandler, db, rdb)
