@@ -14,6 +14,7 @@ import (
 
 	router "vigilantgo/internal/adapters/inbound/http"
 	inhttp "vigilantgo/internal/adapters/inbound/http/authorization"
+	"vigilantgo/internal/adapters/outbound/postgres"
 	authorizationapp "vigilantgo/internal/authorization/application"
 	logger "vigilantgo/internal/logging"
 	"vigilantgo/internal/platform/cache"
@@ -59,10 +60,12 @@ func runServer(cfg *config.Config) error {
 		return fmt.Errorf("init cache: %w", err)
 	}
 
-	useCase := authorizationapp.NewService()
-	handler := inhttp.NewHandler(useCase)
+	profileRepository := postgres.NewProfileRepository(db)
 
-	r := router.NewRouter(handler, db, rdb)
+	authorizationService := authorizationapp.NewService(profileRepository)
+	authorizationHandler := inhttp.NewHandler(authorizationService)
+
+	r := router.NewRouter(authorizationHandler, db, rdb)
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%s", cfg.HTTPPort),

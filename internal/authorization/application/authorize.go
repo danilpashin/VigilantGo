@@ -7,14 +7,17 @@ import (
 	"uuid"
 
 	domain "vigilantgo/internal/authorization/domain"
+	"vigilantgo/internal/profile/ports"
 )
 
 var ErrInvalidCommand = errors.New("invalid authorization command")
 
-type Service struct{}
+type Service struct {
+	profileReader ports.ProfileReader
+}
 
-func NewService() *Service {
-	return &Service{}
+func NewService(profileReader ports.ProfileReader) *Service {
+	return &Service{profileReader: profileReader}
 }
 
 func (s *Service) Evaluate(ctx context.Context, cmd AuthorizeCommand) (AuthorizationResult, error) {
